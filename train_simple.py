@@ -7,7 +7,7 @@ This is a simplified training code of GPEN. It achieves comparable performance a
 '''
 import argparse
 import math
-import random
+import wandb
 import os
 import cv2
 import glob
@@ -82,13 +82,27 @@ def d_r1_loss(real_pred, real_img):
     return grad_penalty
 
 
-def g_nonsaturating_loss(fake_pred, loss_funcs=None, fake_img=None, real_img=None, input_img=None):
-    smooth_l1_loss, id_loss = loss_funcs
+def heatmap_loss(fake_img, real_img, input_img, loss, step):
+    real_heat = (real_img - input_img)**2
+    fake_heat = (fake_img - input_img)**2
+    real_heat[real_heat < torch.mean(real_heat)] = 0.  # avoid working on face parts non-relevant
+    fake_heat[fake_heat < torch.mean(fake_heat)] = 0.  # avoid working on face parts non-relevant
+    if get_rank() == 0:
+        sample = torch.cat((input_img, fake_img, real_img, real_heat, fake_heat), 0) 
+        image = wandb.Image(sample)
+        wandb.log({'training_images': image}, step=step)
+
+    return loss(real_heat, fake_heat)
+
+
+def g_nonsaturating_loss(fake_pred, loss_funcs=None, fake_img=None, real_img=None, input_img=None, step=0):
+    smooth_l1_loss, id_loss, l2_loss = loss_funcs
     
     loss = F.softplus(-fake_pred).mean()
     loss_l1 = smooth_l1_loss(fake_img, real_img)
     loss_id, __, __ = id_loss(fake_img, real_img, input_img)
-    loss += 1.0*loss_l1 + 1.0*loss_id
+    heat_loss = heatmap_loss(fake_img, real_img, input_img, l2_loss, step)
+    loss += 10*loss_l1 + 1.0*loss_id + 10*heat_loss  # ANALYZE L1 Loss relevance
 
     return loss
 
@@ -108,11 +122,13 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
 
     return path_penalty, path_mean.detach(), path_lengths
 
-def validation(model, lpips_func, args, device):
-    lq_files = sorted(glob.glob(os.path.join(args.val_dir, 'lq', '*.*')))
-    hq_files = sorted(glob.glob(os.path.join(args.val_dir, 'hq', '*.*')))
+def validation(model, lpips_func, args, device, iter, restrict_val=500):
+    lq_files = [os.path.join(args.in_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]  # remove '\n' at the end
+    hq_files = [os.path.join(args.out_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]
 
     assert len(lq_files) == len(hq_files)
+
+    print('Input Validation len:', len(lq_files))
 
     dist_sum = 0
     model.eval()
@@ -124,7 +140,7 @@ def validation(model, lpips_func, args, device):
         img_t = torch.flip(img_t, [1])
         
         with torch.no_grad():
-            img_out, __ = model(img_t)
+            img_out, __ = model(img_t, iter)
         
             img_hq = lpips.im2tensor(lpips.load_image(hq_f)).to(device)
             img_hq = F.interpolate(img_hq, (args.size, args.size))
@@ -134,6 +150,9 @@ def validation(model, lpips_func, args, device):
 
 
 def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, device):
+    if get_rank() == 0:
+        wandb.init(project='smilification')
+        wandb.config.update(vars(args))
     loader = sample_data(loader)
 
     pbar = range(0, args.iter)
@@ -148,7 +167,6 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
     g_loss_val = 0
     path_loss = torch.tensor(0.0, device=device)
     path_lengths = torch.tensor(0.0, device=device)
-    mean_path_length_avg = 0
     loss_dict = {}
 
     if args.distributed:
@@ -166,25 +184,25 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
 
         if i > args.iter:
             print('Done!')
-
             break
 
-        degraded_img, real_img = next(loader)
-        degraded_img = degraded_img.to(device)
-        real_img = real_img.to(device)
+        input_img, output_img = next(loader)  # degraded_img, real_img
+        input_img = input_img.to(device)
+        output_img = output_img.to(device)
 
         requires_grad(generator, False)
         requires_grad(discriminator, True)
+        # print('AM HERE')
+        generated_output_img, _ = generator(input_img, i)  # fake_img
+        # print('OUTPUT SIZE:', generated_output_img.shape)
+        d_generated_output_img = discriminator(generated_output_img)  # fake_pred
 
-        fake_img, _ = generator(degraded_img)
-        fake_pred = discriminator(fake_img)
-
-        real_pred = discriminator(real_img)
-        d_loss = d_logistic_loss(real_pred, fake_pred)
+        d_output_img = discriminator(output_img)  # real_pred
+        d_loss = d_logistic_loss(d_output_img, d_generated_output_img)
 
         loss_dict['d'] = d_loss
-        loss_dict['real_score'] = real_pred.mean()
-        loss_dict['fake_score'] = fake_pred.mean()
+        loss_dict['real_score'] = d_output_img.mean()
+        loss_dict['fake_score'] = d_generated_output_img.mean()
 
         discriminator.zero_grad()
         d_loss.backward()
@@ -193,12 +211,12 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
         d_regularize = i % args.d_reg_every == 0
 
         if d_regularize:
-            real_img.requires_grad = True
-            real_pred = discriminator(real_img)
-            r1_loss = d_r1_loss(real_pred, real_img)
+            output_img.requires_grad = True
+            d_generated_output_img = discriminator(output_img)
+            r1_loss = d_r1_loss(d_generated_output_img, output_img)
 
             discriminator.zero_grad()
-            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * d_generated_output_img[0]).backward()
 
             d_optim.step()
 
@@ -207,9 +225,9 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
         requires_grad(generator, True)
         requires_grad(discriminator, False)
 
-        fake_img, _ = generator(degraded_img)
-        fake_pred = discriminator(fake_img)
-        g_loss = g_nonsaturating_loss(fake_pred, losses, fake_img, real_img, degraded_img)
+        generated_output_img, _ = generator(input_img, i)
+        d_generated_output_img = discriminator(generated_output_img)
+        g_loss = g_nonsaturating_loss(d_generated_output_img, losses, fake_img=generated_output_img, real_img=output_img, input_img=input_img, step=i)
 
         loss_dict['g'] = g_loss
 
@@ -220,27 +238,22 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
         g_regularize = i % args.g_reg_every == 0
 
         if g_regularize:
-            path_batch_size = max(1, args.batch // args.path_batch_shrink)
 
-            fake_img, latents = generator(degraded_img, return_latents=True)
+            generated_output_img, latents = generator(input_img, i, return_latents=True)
 
             path_loss, mean_path_length, path_lengths = g_path_regularize(
-                fake_img, latents, mean_path_length
+                generated_output_img, latents, mean_path_length
             )
 
             generator.zero_grad()
             weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
 
             if args.path_batch_shrink:
-                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
+                weighted_path_loss += 0 * generated_output_img[0, 0, 0, 0]
 
             weighted_path_loss.backward()
 
             g_optim.step()
-
-            mean_path_length_avg = (
-                reduce_sum(mean_path_length).item() / get_world_size()
-            )
 
         loss_dict['path'] = path_loss
         loss_dict['path_length'] = path_lengths.mean()
@@ -252,10 +265,6 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
         d_loss_val = loss_reduced['d'].mean().item()
         g_loss_val = loss_reduced['g'].mean().item()
         r1_val = loss_reduced['r1'].mean().item()
-        path_loss_val = loss_reduced['path'].mean().item()
-        real_score_val = loss_reduced['real_score'].mean().item()
-        fake_score_val = loss_reduced['fake_score'].mean().item()
-        path_length_val = loss_reduced['path_length'].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -263,12 +272,19 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                     f'd: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; '
                 )
             )
+
+            if i % 10 == 0:
+                wandb.log({
+                    'd_loss': d_loss_val,
+                    'g_loss': g_loss_val,
+                    'r1': r1_val
+                }, step=i)
             
-            if i % args.save_freq == 0:
+            if i % args.save_freq == 10:
                 with torch.no_grad():
                     g_ema.eval()
-                    sample, _ = g_ema(degraded_img)
-                    sample = torch.cat((degraded_img, sample, real_img), 0) 
+                    sample, _ = g_ema(input_img, i)
+                    sample = torch.cat((input_img, sample, output_img), 0) 
                     utils.save_image(
                         sample,
                         f'{args.sample}/{str(i).zfill(6)}.png',
@@ -276,9 +292,12 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                         normalize=True,
                         range=(-1, 1),
                     )
+                    image = wandb.Image(sample)
+                    wandb.log({'images': image}, step=i)
 
-                lpips_value = validation(g_ema, lpips_func, args, device)
-                print(f'{i}/{args.iter}: lpips: {lpips_value.cpu().numpy()[0][0][0][0]}')
+                lpips_value = validation(g_ema, lpips_func, args, device, i)
+                print(f'VALIDATION --> {i}/{args.iter}: lpips: {lpips_value.cpu().numpy()[0][0][0][0]}')
+                wandb.log({'lpips': lpips_value.cpu().numpy()[0][0][0][0]}, step=i)
 
             if i and i % args.save_freq == 0:
                 torch.save(
@@ -291,17 +310,22 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                     },
                     f'{args.ckpt}/{str(i).zfill(6)}.pth',
                 )
+    if get_rank() == 0:
+        wandb.finish()
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--path', type=str, required=True)
+    parser.add_argument('--in_path', type=str, required=True)
+    parser.add_argument('--out_path', type=str, required=True)
+    parser.add_argument('--train_files', type=str, required=True)
+    parser.add_argument('--val_files', type=str, required=True)
     parser.add_argument('--base_dir', type=str, default='./')
     parser.add_argument('--iter', type=int, default=4000000)
     parser.add_argument('--batch', type=int, default=4)
-    parser.add_argument('--size', type=int, default=256)
+    parser.add_argument('--size', type=int, default=512)
     parser.add_argument('--channel_multiplier', type=int, default=2)
     parser.add_argument('--narrow', type=float, default=1.0)
     parser.add_argument('--r1', type=float, default=10)
@@ -309,7 +333,7 @@ if __name__ == '__main__':
     parser.add_argument('--path_batch_shrink', type=int, default=2)
     parser.add_argument('--d_reg_every', type=int, default=16)
     parser.add_argument('--g_reg_every', type=int, default=4)
-    parser.add_argument('--save_freq', type=int, default=10000)
+    parser.add_argument('--save_freq', type=int, default=500)
     parser.add_argument('--lr', type=float, default=0.002)
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--ckpt', type=str, default='ckpts')
@@ -379,6 +403,7 @@ if __name__ == '__main__':
     smooth_l1_loss = torch.nn.SmoothL1Loss().to(device)
     id_loss = IDLoss(args.base_dir, device, ckpt_dict=None)
     lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
+    l2_loss = torch.nn.MSELoss().to(device)
     
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
@@ -402,7 +427,8 @@ if __name__ == '__main__':
             broadcast_buffers=False,
         )
 
-    dataset = FaceDataset(args.path, args.size)
+    dataset = FaceDataset(args.in_path, args.out_path, args.train_files, args.size)
+    print('Len of training data:', dataset.length)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
@@ -410,5 +436,5 @@ if __name__ == '__main__':
         drop_last=True,
     )
 
-    train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss], g_optim, d_optim, g_ema, lpips_func, device)
+    train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss, l2_loss], g_optim, d_optim, g_ema, lpips_func, device)
    

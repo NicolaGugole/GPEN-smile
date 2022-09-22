@@ -297,6 +297,7 @@ class NoiseInjection(nn.Module):
             noise = image.new_empty(batch, channel, height, width).normal_()
 
         if self.isconcat:
+            # print(image.shape, self.weight.shape, noise.shape)
             return torch.cat((image, self.weight * noise), dim=1)
         else:
             return image + self.weight * noise
@@ -507,6 +508,9 @@ class Generator(nn.Module):
             for i in range(self.n_mlp + 1):
                 size = 2 ** (i+2)
                 noise.append(torch.randn(batch, self.channels[size], size, size, device=styles[0].device))
+                if i != 0:
+                    noise.append(torch.randn(batch, self.channels[size], size, size, device=styles[0].device))
+        # print([n.shape for n in noise])
             
         if truncation < 1:
             style_t = []
@@ -670,6 +674,7 @@ class FullGenerator(nn.Module):
 
     def forward(self,
         inputs,
+        iter,
         return_latents=False,
         inject_index=None,
         truncation=1,
@@ -686,7 +691,11 @@ class FullGenerator(nn.Module):
         outs = self.final_linear(inputs)
         #print(outs.shape)
         noise = list(itertools.chain.from_iterable(itertools.repeat(x, 2) for x in noise))[::-1]
-        outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=noise[1:])
+        if iter < 5000:
+            # print('Avoiding identity..')
+            outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=None)
+        else:
+            outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=noise[1:])
         return outs
 
 class Discriminator(nn.Module):
