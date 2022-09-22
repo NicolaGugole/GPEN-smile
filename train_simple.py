@@ -7,6 +7,7 @@ This is a simplified training code of GPEN. It achieves comparable performance a
 '''
 import argparse
 import math
+from telnetlib import KERMIT
 import wandb
 import os
 import cv2
@@ -83,11 +84,14 @@ def d_r1_loss(real_pred, real_img):
     return grad_penalty
 
 
-def heatmap_loss(fake_img, real_img, input_img, loss, step):
+def heatmap_loss(fake_img, real_img, input_img, loss, step, heatmap_blur=None):
     real_heat = (real_img - input_img)**2
     fake_heat = (fake_img - input_img)**2
     real_heat[real_heat < torch.mean(real_heat)] = 0.  # avoid working on face parts non-relevant
     fake_heat[fake_heat < torch.mean(fake_heat)] = 0.  # avoid working on face parts non-relevant
+    if heatmap_blur is not None:
+        real_heat = heatmap_blur(real_heat)
+        fake_heat = heatmap_blur(fake_heat)
     if get_rank() == 0:
         sample = torch.cat((input_img, fake_img, real_img, real_heat, fake_heat), 0) 
         image = wandb.Image(sample)
@@ -96,13 +100,13 @@ def heatmap_loss(fake_img, real_img, input_img, loss, step):
     return loss(real_heat, fake_heat)
 
 
-def g_nonsaturating_loss(fake_pred, loss_funcs=None, fake_img=None, real_img=None, input_img=None, step=0):
+def g_nonsaturating_loss(fake_pred, loss_funcs=None, fake_img=None, real_img=None, input_img=None, step=0, heatmap_blur=None):
     smooth_l1_loss, id_loss, l2_loss = loss_funcs
     
     loss = F.softplus(-fake_pred).mean()
     loss_l1 = smooth_l1_loss(fake_img, real_img)
     loss_id, __, __ = id_loss(fake_img, real_img, input_img)
-    heat_loss = heatmap_loss(fake_img, real_img, input_img, l2_loss, step)
+    heat_loss = heatmap_loss(fake_img, real_img, input_img, l2_loss, step, heatmap_blur)
     loss += 10*loss_l1 + 1.0*loss_id + 10*heat_loss  # ANALYZE L1 Loss relevance
 
     return loss
@@ -123,7 +127,7 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
 
     return path_penalty, path_mean.detach(), path_lengths
 
-def validation(model, lpips_func, psnr, args, device, iter, restrict_val=50):
+def validation(model, lpips_func, args, device, iter, restrict_val=50):
     lq_files = [os.path.join(args.in_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]  # remove '\n' at the end
     hq_files = [os.path.join(args.out_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]
 
@@ -159,7 +163,7 @@ def validation(model, lpips_func, psnr, args, device, iter, restrict_val=50):
     return measured_lpips.data/len(lq_files), measured_psnr/len(lq_files)
 
 
-def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, psnr, device):
+def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, device, heatmap_blur=None):
     if get_rank() == 0:
         wandb.init(project='smilification')
         wandb.config.update(vars(args))
@@ -237,7 +241,7 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
 
         generated_output_img, _ = generator(input_img, i)
         d_generated_output_img = discriminator(generated_output_img)
-        g_loss = g_nonsaturating_loss(d_generated_output_img, losses, fake_img=generated_output_img, real_img=output_img, input_img=input_img, step=i)
+        g_loss = g_nonsaturating_loss(d_generated_output_img, losses, fake_img=generated_output_img, real_img=output_img, input_img=input_img, step=i, heatmap_blur=heatmap_blur)
 
         loss_dict['g'] = g_loss
 
@@ -305,7 +309,7 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                     image = wandb.Image(sample)
                     wandb.log({'images': image}, step=i)
 
-                lpips_value, psnr_value = validation(g_ema, lpips_func, psnr, args, device, i)
+                lpips_value, psnr_value = validation(g_ema, lpips_func, args, device, i)
                 print(f'VALIDATION --> {i}/{args.iter}: lpips: {lpips_value.cpu().numpy()[0][0][0][0]} - psnr: {psnr_value.cpu().item()}')
                 wandb.log({'lpips': lpips_value.cpu().numpy()[0][0][0][0]}, step=i)
                 wandb.log({'psnr': psnr_value.cpu().item()}, step=i)
@@ -372,6 +376,7 @@ if __name__ == '__main__':
     args.n_mlp = 8
 
     args.start_iter = 0
+    heatmap_blur = transforms.GaussianBlur(101)
 
     generator = FullGenerator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier, narrow=args.narrow, device=device
@@ -415,7 +420,6 @@ if __name__ == '__main__':
     smooth_l1_loss = torch.nn.SmoothL1Loss().to(device)
     id_loss = IDLoss(args.base_dir, device, ckpt_dict=None)
     lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
-    psnr = PeakSignalNoiseRatio()
     l2_loss = torch.nn.MSELoss().to(device)
     
     if args.distributed:
@@ -449,5 +453,5 @@ if __name__ == '__main__':
         drop_last=True,
     )
 
-    train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss, l2_loss], g_optim, d_optim, g_ema, lpips_func, psnr, device)
+    train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss, l2_loss], g_optim, d_optim, g_ema, lpips_func, device, heatmap_blur)
    
