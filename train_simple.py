@@ -12,6 +12,7 @@ import os
 import cv2
 import glob
 from tqdm import tqdm
+from torchmetrics import PeakSignalNoiseRatio
 
 import torch
 from torch import nn, autograd, optim
@@ -122,34 +123,43 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
 
     return path_penalty, path_mean.detach(), path_lengths
 
-def validation(model, lpips_func, args, device, iter, restrict_val=500):
+def validation(model, lpips_func, psnr, args, device, iter, restrict_val=50):
     lq_files = [os.path.join(args.in_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]  # remove '\n' at the end
     hq_files = [os.path.join(args.out_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]
 
     assert len(lq_files) == len(hq_files)
 
     print('Input Validation len:', len(lq_files))
+    psnr = PeakSignalNoiseRatio().to(device)
 
-    dist_sum = 0
+    measured_lpips = 0
+    measured_psnr = 0
     model.eval()
     for lq_f, hq_f in zip(lq_files, hq_files):
         img_lq = cv2.imread(lq_f, cv2.IMREAD_COLOR)
         img_t = torch.from_numpy(img_lq).to(device).permute(2, 0, 1).unsqueeze(0)
         img_t = (img_t/255.-0.5)/0.5
         img_t = F.interpolate(img_t, (args.size, args.size))
-        img_t = torch.flip(img_t, [1])
+        img_lq_t = torch.flip(img_t, [1])
+
+        img_hq = cv2.imread(hq_f, cv2.IMREAD_COLOR)
+        img_t = torch.from_numpy(img_hq).to(device).permute(2, 0, 1).unsqueeze(0)
+        img_t = (img_t/255.-0.5)/0.5
+        img_t = F.interpolate(img_t, (args.size, args.size))
+        img_hq_t = torch.flip(img_t, [1])
         
         with torch.no_grad():
-            img_out, __ = model(img_t, iter)
+            img_out, __ = model(img_lq_t, iter)
         
-            img_hq = lpips.im2tensor(lpips.load_image(hq_f)).to(device)
-            img_hq = F.interpolate(img_hq, (args.size, args.size))
-            dist_sum += lpips_func.forward(img_out, img_hq)
+            img_hq_lpips = lpips.im2tensor(lpips.load_image(hq_f)).to(device)
+            img_hq_lpips = F.interpolate(img_hq_lpips, (args.size, args.size))
+            measured_lpips += lpips_func.forward(img_out, img_hq_lpips)
+            measured_psnr += psnr(img_out, img_hq_t)
     
-    return dist_sum.data/len(lq_files)
+    return measured_lpips.data/len(lq_files), measured_psnr/len(lq_files)
 
 
-def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, device):
+def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, psnr, device):
     if get_rank() == 0:
         wandb.init(project='smilification')
         wandb.config.update(vars(args))
@@ -280,7 +290,7 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                     'r1': r1_val
                 }, step=i)
             
-            if i % args.save_freq == 10:
+            if i % args.save_freq == 0:
                 with torch.no_grad():
                     g_ema.eval()
                     sample, _ = g_ema(input_img, i)
@@ -295,9 +305,11 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                     image = wandb.Image(sample)
                     wandb.log({'images': image}, step=i)
 
-                lpips_value = validation(g_ema, lpips_func, args, device, i)
-                print(f'VALIDATION --> {i}/{args.iter}: lpips: {lpips_value.cpu().numpy()[0][0][0][0]}')
+                lpips_value, psnr_value = validation(g_ema, lpips_func, psnr, args, device, i)
+                print(f'VALIDATION --> {i}/{args.iter}: lpips: {lpips_value.cpu().numpy()[0][0][0][0]} - psnr: {psnr_value.cpu().item()}')
                 wandb.log({'lpips': lpips_value.cpu().numpy()[0][0][0][0]}, step=i)
+                wandb.log({'psnr': psnr_value.cpu().item()}, step=i)
+
 
             if i and i % args.save_freq == 0:
                 torch.save(
@@ -403,6 +415,7 @@ if __name__ == '__main__':
     smooth_l1_loss = torch.nn.SmoothL1Loss().to(device)
     id_loss = IDLoss(args.base_dir, device, ckpt_dict=None)
     lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
+    psnr = PeakSignalNoiseRatio()
     l2_loss = torch.nn.MSELoss().to(device)
     
     if args.distributed:
@@ -436,5 +449,5 @@ if __name__ == '__main__':
         drop_last=True,
     )
 
-    train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss, l2_loss], g_optim, d_optim, g_ema, lpips_func, device)
+    train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss, l2_loss], g_optim, d_optim, g_ema, lpips_func, psnr, device)
    

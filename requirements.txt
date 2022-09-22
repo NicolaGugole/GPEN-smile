@@ -7,3 +7,5 @@ scikit-image
 scipy
 pillow
 tqdm
+wandb
+torchmetrics
