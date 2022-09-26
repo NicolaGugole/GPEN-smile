@@ -92,7 +92,7 @@ def heatmap_loss(fake_img, real_img, input_img, loss, step, heatmap_blur=None):
     if heatmap_blur is not None:
         real_heat = heatmap_blur(real_heat)
         fake_heat = heatmap_blur(fake_heat)
-    if get_rank() == 0:
+    if get_rank() == 0 and step % 50 == 0:
         sample = torch.cat((input_img, fake_img, real_img, real_heat, fake_heat), 0) 
         image = wandb.Image(sample)
         wandb.log({'training_images': image}, step=step)
