@@ -11,11 +11,8 @@ from torch.utils.data import Dataset
 class FaceDataset(Dataset):
     def __init__(self, in_path, out_path, txt_file, resolution=512):
         self.resolution = resolution
-        data_in = [os.path.join(in_path,i)[:-1] for i in open(txt_file) if 'jpg' in i] # remove '\n' at the end
-        data_out = [os.path.join(out_path,i)[:-1] for i in open(txt_file) if 'jpg' in i] # remove '\n' at the end
-        self.input_imgs = [i.split(' ')[0] for i in data_in] 
-        self.output_imgs = [i.split(' ')[0] for i in data_out]
-        self.labels = [torch.LongTensor([int(i.split(' ')[1])]) for i in data_in]
+        self.input_imgs = [os.path.join(in_path,i)[:-1] for i in open(txt_file) if 'jpg' in i]  # remove '\n' at the end
+        self.output_imgs = [os.path.join(out_path,i)[:-1] for i in open(txt_file) if 'jpg' in i]
 
         self.length = len(self.input_imgs)
 
@@ -40,5 +37,5 @@ class FaceDataset(Dataset):
         img_output = img_output.permute(2, 0, 1).flip(0) # BGR->RGB
         img_input = img_input.permute(2, 0, 1).flip(0) # BGR->RGB
 
-        return img_input, img_output, self.labels[index]
+        return img_input, img_output
 

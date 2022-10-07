@@ -7,7 +7,6 @@ import random
 import functools
 import operator
 import itertools
-from typing import Optional
 
 import torch
 from torch import nn
@@ -298,6 +297,7 @@ class NoiseInjection(nn.Module):
             noise = image.new_empty(batch, channel, height, width).normal_()
 
         if self.isconcat:
+            # print(image.shape, self.weight.shape, noise.shape)
             return torch.cat((image, self.weight * noise), dim=1)
         else:
             return image + self.weight * noise
@@ -389,8 +389,7 @@ class Generator(nn.Module):
         lr_mlp=0.01,
         isconcat=True,
         narrow=1,
-        device='cpu',
-        label_num=None
+        device='cpu'
     ):
         super().__init__()
 
@@ -407,7 +406,6 @@ class Generator(nn.Module):
                     style_dim, style_dim, lr_mul=lr_mlp, activation='fused_lrelu', device=device
                 )
             )
-        self.label_embeddings = LabelEmbedding(label_num, size, device) if label_num is not None else None
 
         self.style = nn.Sequential(*layers)
 
@@ -497,7 +495,6 @@ class Generator(nn.Module):
         truncation_latent=None,
         input_is_latent=False,
         noise=None,
-        label=None,
     ):
         if not input_is_latent:
             styles = [self.style(s) for s in styles]
@@ -513,6 +510,7 @@ class Generator(nn.Module):
                 noise.append(torch.randn(batch, self.channels[size], size, size, device=styles[0].device))
                 if i != 0:
                     noise.append(torch.randn(batch, self.channels[size], size, size, device=styles[0].device))
+        # print([n.shape for n in noise])
             
         if truncation < 1:
             style_t = []
@@ -539,26 +537,22 @@ class Generator(nn.Module):
             latent = torch.cat([latent, latent2], 1)
 
         out = self.input(latent)
-        # print('FIRST GEN', out.shape)
         out = self.conv1(out, latent[:, 0], noise=noise[0])
-        # print(out.shape)
 
         skip = self.to_rgb1(out, latent[:, 1])
-        # print('SKIP', skip.shape)
 
         i = 1
         for conv1, conv2, noise1, noise2, to_rgb in zip(
             self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
         ):
-            skip *= self.label_embeddings(label, skip.shape[-1])
             out = conv1(out, latent[:, i], noise=noise1)
             out = conv2(out, latent[:, i + 1], noise=noise2)
             skip = to_rgb(out, latent[:, i + 2], skip)
-            # print(skip.shape)
 
             i += 2
 
         image = skip
+
         if return_latents:
             return image, latent
 
@@ -635,21 +629,6 @@ class ResBlock(nn.Module):
 
         return out
 
-class LabelEmbedding(nn.Module):
-    def __init__(self, num_embeddings: int, size, device) -> None:
-        super().__init__()
-        embedding_dims = [2**i for i in range(int(math.log(size, 2)), 1, -1)]
-        self.embeddings = [-1, -1]  # each embedding index represents a embedding dim of 2^i but dimension 2^0 and 2^1 are not present
-        for ed in embedding_dims[::-1]:
-            self.embeddings.append(nn.Embedding(num_embeddings, ed, device=device))
-        self.identity_embeddings = [torch.ones(2**i, device=device) for i in range(int(math.log(size, 2) + 1))]
-    
-    def forward(self, label: Optional[torch.LongTensor], embedding_size: int) -> torch.Tensor:
-        if label is not None:
-            return self.embeddings[int(math.log(embedding_size, 2))](label)
-        else:
-            return self.identity_embeddings[int(math.log(embedding_size, 2))]
-
 class FullGenerator(nn.Module):
     def __init__(
         self,
@@ -661,8 +640,7 @@ class FullGenerator(nn.Module):
         lr_mlp=0.01,
         isconcat=True,
         narrow=1,
-        device='cpu',
-        label_num = 3,
+        device='cpu'
     ):
         super().__init__()
         channels = {
@@ -679,7 +657,8 @@ class FullGenerator(nn.Module):
         }
 
         self.log_size = int(math.log(size, 2))
-        self.generator = Generator(size, style_dim, n_mlp, channel_multiplier=channel_multiplier, blur_kernel=blur_kernel, lr_mlp=lr_mlp, isconcat=isconcat, narrow=narrow, device=device, label_num=label_num)
+        self.generator = Generator(size, style_dim, n_mlp, channel_multiplier=channel_multiplier, blur_kernel=blur_kernel, lr_mlp=lr_mlp, isconcat=isconcat, narrow=narrow, device=device)
+        
         conv = [ConvLayer(3, channels[size], 1, device=device)]
         self.ecd0 = nn.Sequential(*conv)
         in_channel = channels[size]
@@ -701,31 +680,22 @@ class FullGenerator(nn.Module):
         truncation=1,
         truncation_latent=None,
         input_is_latent=False,
-        label=None,
     ):
         noise = []
         for i in range(self.log_size-1):
             ecd = getattr(self, self.names[i])
-            # inputs *= self.generator.label_embeddings(label, inputs.shape[-1])
             inputs = ecd(inputs)
-            # print(inputs.shape)
             noise.append(inputs)
             #print(inputs.shape)
-        # multiply last one 
-        # inputs *= self.generator.label_embeddings(label, inputs.shape[-1])
         inputs = inputs.view(inputs.shape[0], -1)
-        # print('AFTER for', inputs.shape)
         outs = self.final_linear(inputs)
-        # label_embedding = self.generator.label_embeddings(label, outs.shape[-1])
-        # print(outs.shape, label_embedding.shape)
-        # outs *= label_embedding
-        # print(outs.shape)
+        #print(outs.shape)
         noise = list(itertools.chain.from_iterable(itertools.repeat(x, 2) for x in noise))[::-1]
         if iter < 2000:
             # print('Avoiding identity..')
-            outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=None, label=label)
+            outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=None)
         else:
-            outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=noise[1:], label=label)
+            outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=noise[1:])
         return outs
 
 class Discriminator(nn.Module):

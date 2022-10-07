@@ -127,9 +127,12 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
 
     return path_penalty, path_mean.detach(), path_lengths
 
-def validation(model, lpips_func, args, device, iter, restrict_val=50):
-    lq_files = [os.path.join(args.in_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]  # remove '\n' at the end
-    hq_files = [os.path.join(args.out_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i][:restrict_val]
+def validation(model, lpips_func, args, device, iter):
+    data_in = [os.path.join(args.in_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i] # remove '\n' at the end
+    data_out = [os.path.join(args.out_path,i)[:-1] for i in open(args.val_files) if 'jpg' in i] # remove '\n' at the end
+    lq_files = [i.split(' ')[0] for i in data_in] 
+    hq_files = [i.split(' ')[0] for i in data_out]
+    labels = [torch.LongTensor([int(i.split(' ')[1])]) for i in data_in]
 
     assert len(lq_files) == len(hq_files)
 
@@ -139,7 +142,7 @@ def validation(model, lpips_func, args, device, iter, restrict_val=50):
     measured_lpips = 0
     measured_psnr = 0
     model.eval()
-    for lq_f, hq_f in zip(lq_files, hq_files):
+    for lq_f, hq_f, label in zip(lq_files, hq_files, labels):
         img_lq = cv2.imread(lq_f, cv2.IMREAD_COLOR)
         img_t = torch.from_numpy(img_lq).to(device).permute(2, 0, 1).unsqueeze(0)
         img_t = (img_t/255.-0.5)/0.5
@@ -151,9 +154,13 @@ def validation(model, lpips_func, args, device, iter, restrict_val=50):
         img_t = (img_t/255.-0.5)/0.5
         img_t = F.interpolate(img_t, (args.size, args.size))
         img_hq_t = torch.flip(img_t, [1])
+
+        img_lq_t = img_lq_t.to(device)
+        img_hq_t = img_hq_t.to(device)
+        label = label.to(device)
         
         with torch.no_grad():
-            img_out, __ = model(img_lq_t, iter)
+            img_out, __ = model(img_lq_t, iter, label=label)
         
             img_hq_lpips = lpips.im2tensor(lpips.load_image(hq_f)).to(device)
             img_hq_lpips = F.interpolate(img_hq_lpips, (args.size, args.size))
@@ -165,7 +172,7 @@ def validation(model, lpips_func, args, device, iter, restrict_val=50):
 
 def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, device, heatmap_blur=None):
     if get_rank() == 0:
-        wandb.init(project='smilification')
+        wandb.init(project='lifting-cgpen')
         wandb.config.update(vars(args))
     loader = sample_data(loader)
 
@@ -200,14 +207,15 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
             print('Done!')
             break
 
-        input_img, output_img = next(loader)  # degraded_img, real_img
+        input_img, output_img, label = next(loader)  # degraded_img, real_img
         input_img = input_img.to(device)
         output_img = output_img.to(device)
+        label = label.to(device)
 
         requires_grad(generator, False)
         requires_grad(discriminator, True)
         # print('AM HERE')
-        generated_output_img, _ = generator(input_img, i)  # fake_img
+        generated_output_img, _ = generator(input_img, i, label=label)  # fake_img
         # print('OUTPUT SIZE:', generated_output_img.shape)
         d_generated_output_img = discriminator(generated_output_img)  # fake_pred
 
@@ -239,7 +247,7 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
         requires_grad(generator, True)
         requires_grad(discriminator, False)
 
-        generated_output_img, _ = generator(input_img, i)
+        generated_output_img, _ = generator(input_img, i, label=label)
         d_generated_output_img = discriminator(generated_output_img)
         g_loss = g_nonsaturating_loss(d_generated_output_img, losses, fake_img=generated_output_img, real_img=output_img, input_img=input_img, step=i, heatmap_blur=heatmap_blur)
 
@@ -253,7 +261,7 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
 
         if g_regularize:
 
-            generated_output_img, latents = generator(input_img, i, return_latents=True)
+            generated_output_img, latents = generator(input_img, i, return_latents=True, label=label)
 
             path_loss, mean_path_length, path_lengths = g_path_regularize(
                 generated_output_img, latents, mean_path_length
@@ -381,6 +389,7 @@ if __name__ == '__main__':
     generator = FullGenerator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier, narrow=args.narrow, device=device
     ).to(device)
+
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier, narrow=args.narrow, device=device
     ).to(device)
@@ -452,6 +461,7 @@ if __name__ == '__main__':
         sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
         drop_last=True,
     )
+    torch.autograd.set_detect_anomaly(True)
 
     train(args, loader, generator, discriminator, [smooth_l1_loss, id_loss, l2_loss], g_optim, d_optim, g_ema, lpips_func, device, heatmap_blur)
    

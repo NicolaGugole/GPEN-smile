@@ -7,15 +7,15 @@ import os
 import time
 import cv2
 
-IMG_DIR = '/home/wizard/GPEN/examples/ffhq-10'
-SAVE_DIR = '/home/wizard/GPEN/inference_results'
+IMG_DIR = '/home/wizard/GPEN-smile/examples/ffhq-10'
+SAVE_DIR = '/home/wizard/GPEN-smile/inference_results'
 
 if __name__ == '__main__':
     for n, i in enumerate(os.listdir(IMG_DIR)):
         if '.png' in i:
             start = time.time()
-            model_state = torch.load('/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/smilification/013500.pth')
-            model = FullGenerator(1024, 512, 8).cuda()
+            model_state = torch.load('/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/smilification/5000-noise/027000.pth')
+            model = FullGenerator(1024, 512, 8, device='cuda:0').to('cuda:0')
             model.load_state_dict(model_state['g_ema'])
             print('model loaded in ', time.time() - start)
             print(f'{n}/{len(os.listdir(IMG_DIR))}')
