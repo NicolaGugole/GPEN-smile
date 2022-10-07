@@ -407,7 +407,6 @@ class Generator(nn.Module):
                     style_dim, style_dim, lr_mul=lr_mlp, activation='fused_lrelu', device=device
                 )
             )
-        self.label_embeddings = LabelEmbedding(label_num, size, device) if label_num is not None else None
 
         self.style = nn.Sequential(*layers)
 
@@ -550,7 +549,6 @@ class Generator(nn.Module):
         for conv1, conv2, noise1, noise2, to_rgb in zip(
             self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
         ):
-            skip *= self.label_embeddings(label, skip.shape[-1])
             out = conv1(out, latent[:, i], noise=noise1)
             out = conv2(out, latent[:, i + 1], noise=noise2)
             skip = to_rgb(out, latent[:, i + 2], skip)
@@ -638,17 +636,15 @@ class ResBlock(nn.Module):
 class LabelEmbedding(nn.Module):
     def __init__(self, num_embeddings: int, size, device) -> None:
         super().__init__()
-        embedding_dims = [2**i for i in range(int(math.log(size, 2)), 1, -1)]
-        self.embeddings = [-1, -1]  # each embedding index represents a embedding dim of 2^i but dimension 2^0 and 2^1 are not present
-        for ed in embedding_dims[::-1]:
-            self.embeddings.append(nn.Embedding(num_embeddings, ed, device=device))
-        self.identity_embeddings = [torch.ones(2**i, device=device) for i in range(int(math.log(size, 2) + 1))]
+        self.embeddings = nn.Embedding(num_embeddings, size, device=device)
+        self.identity_embeddings = torch.ones(size, device=device)
     
-    def forward(self, label: Optional[torch.LongTensor], embedding_size: int) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor, label: Optional[torch.LongTensor]) -> torch.Tensor:
+        # multiply embedding and inputs to condition
         if label is not None:
-            return self.embeddings[int(math.log(embedding_size, 2))](label)
+            return inputs * self.embeddings(label)
         else:
-            return self.identity_embeddings[int(math.log(embedding_size, 2))]
+            return inputs * self.identity_embeddings
 
 class FullGenerator(nn.Module):
     def __init__(
@@ -683,6 +679,7 @@ class FullGenerator(nn.Module):
         conv = [ConvLayer(3, channels[size], 1, device=device)]
         self.ecd0 = nn.Sequential(*conv)
         in_channel = channels[size]
+        self.label_embeddings_condition = LabelEmbedding(label_num, size, device) if label_num is not None else None
 
         self.names = ['ecd%d'%i for i in range(self.log_size-1)]
         for i in range(self.log_size, 2, -1):
@@ -704,22 +701,15 @@ class FullGenerator(nn.Module):
         label=None,
     ):
         noise = []
+        # condition only the input
+        inputs = self.label_embeddings_condition(inputs, label)
         for i in range(self.log_size-1):
             ecd = getattr(self, self.names[i])
-            # inputs *= self.generator.label_embeddings(label, inputs.shape[-1])
             inputs = ecd(inputs)
-            # print(inputs.shape)
             noise.append(inputs)
-            #print(inputs.shape)
         # multiply last one 
-        # inputs *= self.generator.label_embeddings(label, inputs.shape[-1])
         inputs = inputs.view(inputs.shape[0], -1)
-        # print('AFTER for', inputs.shape)
         outs = self.final_linear(inputs)
-        # label_embedding = self.generator.label_embeddings(label, outs.shape[-1])
-        # print(outs.shape, label_embedding.shape)
-        # outs *= label_embedding
-        # print(outs.shape)
         noise = list(itertools.chain.from_iterable(itertools.repeat(x, 2) for x in noise))[::-1]
         if iter < 2000:
             # print('Avoiding identity..')
