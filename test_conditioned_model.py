@@ -18,7 +18,7 @@ from torch.nn import functional as F
 from torch.utils import data
 
 # from training.data_loader.dataset_face import FaceDataset
-from face_model.gpen_model import FullGenerator
+from face_model.gpen_model_classic import FullGenerator
 from distributed import (
     synchronize,
 )
@@ -73,7 +73,7 @@ def test(model, lpips_func, args, device, iter, label = 0):  # fixed label to 0,
         img_hq_t = torch.flip(img_t, [1])
         
         with torch.no_grad():
-            img_out, __ = model(img_lq_t, iter)
+            img_out, __ = model(img_lq_t, iter) #, label = torch.LongTensor([label]).cuda())
         
             img_hq_lpips = lpips.im2tensor(lpips.load_image(hq_f)).to(device)
             img_hq_lpips = F.interpolate(img_hq_lpips, (args.size, args.size))
@@ -118,7 +118,7 @@ if __name__ == '__main__':
 
     args.latent = 512
     args.n_mlp = 8
-    curr_ckpt = '/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/lifting-gpen/stylegan-remini/unconditioned_0/028000.pth'
+    curr_ckpt = '/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/lifting-gpen/stylegan-remini/unconditional_0/053000.pth'
     g_ema = FullGenerator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier, narrow=args.narrow, device=device
     ).to(device)
@@ -127,7 +127,7 @@ if __name__ == '__main__':
     ckpt = torch.load(curr_ckpt)
     g_ema.load_state_dict(ckpt['g_ema'])
     lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
-    lpips_value, psnr_value = test(g_ema, lpips_func, args, device, 10000, label = 0)
+    lpips_value, psnr_value = test(g_ema, lpips_func, args, device, 10000)#, label = 0)
     print(f'Results with {curr_ckpt} - lpips_value: {lpips_value} - psnr_value: {psnr_value}')
     print('LPIPS:', lpips_value.cpu().squeeze().item())
     print('PSNR:', psnr_value.cpu().squeeze().item())

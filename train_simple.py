@@ -24,7 +24,7 @@ from torchvision import transforms, utils
 
 import __init_paths
 from training.data_loader.dataset_face import FaceDataset
-from face_model.gpen_model import FullGenerator, Discriminator
+from face_model.gpen_model_condition_input_multiply import FullGenerator, Discriminator
 
 from training.loss.id_loss import IDLoss
 from distributed import (

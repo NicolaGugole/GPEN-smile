@@ -1,5 +1,5 @@
 import torch
-from face_model.gpen_model import FullGenerator
+from face_model.gpen_model_condition_input_multiply import FullGenerator
 from PIL import Image
 from torchvision import utils
 from torch.nn import functional as F

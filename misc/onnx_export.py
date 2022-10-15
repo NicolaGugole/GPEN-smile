@@ -9,7 +9,7 @@ from torch.autograd import Variable
 
 import __init_paths
 #from face_model import model
-from face_model.gpen_model import FullGenerator
+from face_model.gpen_model_condition_input_multiply import FullGenerator
 
 def model_load(model, path):
     """Load model."""
