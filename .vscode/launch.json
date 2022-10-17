@@ -5,6 +5,7 @@
     "version": "0.2.0",
     "configurations": [
 
+
         {
             "name": "Python: Current File",
             "type": "python",
@@ -12,7 +13,8 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "env": { "PYTHONPATH": "${workspaceRoot}"}
+            "env": { "PYTHONPATH": "${workspaceRoot}"},
+            "args": ["--ckpt","/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/lifting-gpen/stylegan-remini/condition_concat_encoder_embedding", "--batch", "2"]
         }
     ]
 }

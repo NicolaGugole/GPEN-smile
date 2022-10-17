@@ -408,7 +408,6 @@ class Generator(nn.Module):
                 )
             )
         self.style = nn.Sequential(*layers)
-        self.label_embeddings = LabelEmbedding()
 
         self.channels = {
             4: int(512 * narrow),
@@ -632,18 +631,19 @@ class ResBlock(nn.Module):
         return out
 
 class LabelEmbedding(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, num_embeddings: int, size, device) -> None:
         super().__init__()
-
+        embedding_dims = [2**i for i in range(int(math.log(size, 2)), 1, -1)]
+        self.embeddings = [-1, -1]  # each embeddin xg index represents a embedding dim of 2^i but dimension 2^0 and 2^1 are not present
+        for ed in embedding_dims[::-1]:
+            self.embeddings.append(nn.Parameter(torch.randn((num_embeddings, 3, ed, ed), device=device, requires_grad=True)))
     
-    def forward(self, inputs: torch.Tensor, label: Optional[torch.LongTensor]) -> torch.Tensor:
-        labels = []
-        for l in torch.flatten(label):
-            labels.append(torch.ones_like(inputs)[0] * l)
-        labels = torch.stack(labels)
-        print(labels.shape)
-        print(inputs.shape, (torch.ones_like(inputs)*labels).shape)
-        return torch.cat((inputs, torch.ones_like(inputs)*labels), 1)
+    def forward(self, inputs: torch.Tensor, label: Optional[torch.LongTensor], embedding_size: int) -> torch.Tensor:
+        embs = []
+        for l in label.flatten():
+            embs.append(self.embeddings[int(math.log(embedding_size, 2))][l])
+        embs = torch.stack(embs)
+        return torch.cat((inputs, embs), 1)
 
 class FullGenerator(nn.Module):
     def __init__(
@@ -678,6 +678,7 @@ class FullGenerator(nn.Module):
         conv = [ConvLayer(2 * 3, channels[size], 1, device=device)]  # concatenating labels
         self.ecd0 = nn.Sequential(*conv)
         in_channel = 2 * channels[size]
+        self.label_embeddings = LabelEmbedding(num_embeddings=label_num, size=size, device=device)
 
         self.names = ['ecd%d'%i for i in range(self.log_size-1)]
         for i in range(self.log_size, 2, -1):
@@ -701,7 +702,7 @@ class FullGenerator(nn.Module):
         noise = []
         for i in range(self.log_size-1):
             ecd = getattr(self, self.names[i])
-            inputs = self.generator.label_embeddings(inputs, label)
+            inputs = self.label_embeddings(inputs, label, embedding_size=inputs.shape[-1])
             inputs = ecd(inputs)
             noise.append(inputs)
         inputs = inputs.view(inputs.shape[0], -1)

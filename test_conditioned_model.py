@@ -125,6 +125,7 @@ if __name__ == '__main__':
     g_ema.eval()
     print('load model:', curr_ckpt)
     ckpt = torch.load(curr_ckpt)
+    print(ckpt['g_ema'].keys())
     g_ema.load_state_dict(ckpt['g_ema'])
     lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
     lpips_value, psnr_value = test(g_ema, lpips_func, args, device, 10000)#, label = 0)

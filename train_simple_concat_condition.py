@@ -24,7 +24,7 @@ from torchvision import transforms, utils
 
 import __init_paths
 from training.data_loader.dataset_face import FaceDataset
-from face_model.gpen_model_condition_whole_model_concat_repeated_label import FullGenerator, Discriminator
+from face_model.gpen_model_condition_whole_model_concat_embedding import FullGenerator, Discriminator
 
 from training.loss.id_loss import IDLoss
 from distributed import (
@@ -94,8 +94,8 @@ def heatmap_loss(fake_img, real_img, input_img, loss, step, heatmap_blur=None):
         fake_heat = heatmap_blur(fake_heat)
     if get_rank() == 0 and step % 50 == 0:
         sample = torch.cat((input_img, fake_img, real_img, real_heat, fake_heat), 0) 
-        image = wandb.Image(sample)
-        wandb.log({'training_images': image}, step=step)
+        # image = wandb.Image(sample)
+        # wandb.log({'training_images': image}, step=step)
 
     return loss(real_heat, fake_heat)
 
@@ -171,9 +171,9 @@ def validation(model, lpips_func, args, device, iter):
 
 
 def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_ema, lpips_func, device, heatmap_blur=None):
-    if get_rank() == 0:
-        wandb.init(project='lifting-cgpen')
-        wandb.config.update(vars(args))
+    # if get_rank() == 0:
+        # wandb.init(project='lifting-cgpen')
+        # wandb.config.update(vars(args))
     loader = sample_data(loader)
 
     pbar = range(0, args.iter)
@@ -295,12 +295,12 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                 )
             )
 
-            if i % 10 == 0:
-                wandb.log({
-                    'd_loss': d_loss_val,
-                    'g_loss': g_loss_val,
-                    'r1': r1_val
-                }, step=i)
+            # if i % 10 == 0:
+            #     wandb.log({
+            #         'd_loss': d_loss_val,
+            #         'g_loss': g_loss_val,
+            #         'r1': r1_val
+            #     }, step=i)
             
             if i % args.save_freq == 0:
                 with torch.no_grad():
@@ -314,13 +314,13 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                         normalize=True,
                         range=(-1, 1),
                     )
-                    image = wandb.Image(sample)
-                    wandb.log({'images': image}, step=i)
+                    # image = wandb.Image(sample)
+                    # wandb.log({'images': image}, step=i)
 
                 lpips_value, psnr_value = validation(g_ema, lpips_func, args, device, i)
                 print(f'VALIDATION --> {i}/{args.iter}: lpips: {lpips_value.cpu().numpy()[0][0][0][0]} - psnr: {psnr_value.cpu().item()}')
-                wandb.log({'lpips': lpips_value.cpu().numpy()[0][0][0][0]}, step=i)
-                wandb.log({'psnr': psnr_value.cpu().item()}, step=i)
+                # wandb.log({'lpips': lpips_value.cpu().numpy()[0][0][0][0]}, step=i)
+                # wandb.log({'psnr': psnr_value.cpu().item()}, step=i)
 
 
             if i and i % args.save_freq == 0:
@@ -334,18 +334,18 @@ def train(args, loader, generator, discriminator, losses, g_optim, d_optim, g_em
                     },
                     f'{args.ckpt}/{str(i).zfill(6)}.pth',
                 )
-    if get_rank() == 0:
-        wandb.finish()
+    # if get_rank() == 0:
+    #     wandb.finish()
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--in_path', type=str, required=True)
-    parser.add_argument('--out_path', type=str, required=True)
-    parser.add_argument('--train_files', type=str, required=True)
-    parser.add_argument('--val_files', type=str, required=True)
+    parser.add_argument('--in_path', type=str, default='/home/wizard/buckets/bsp-ai-science-public-datasets/stylegan-beautification-various-levels/input')
+    parser.add_argument('--out_path', type=str, default='/home/wizard/buckets/bsp-ai-science-public-datasets/stylegan-beautification-various-levels/output')
+    parser.add_argument('--train_files', type=str, default='/home/wizard/buckets/bsp-ai-science-public-datasets/stylegan-beautification-various-levels/train.txt')
+    parser.add_argument('--val_files', type=str, default='/home/wizard/buckets/bsp-ai-science-public-datasets/stylegan-beautification-various-levels/val.txt')
     parser.add_argument('--base_dir', type=str, default='/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/smilification')
     parser.add_argument('--iter', type=int, default=4000000)
     parser.add_argument('--batch', type=int, default=1)
@@ -360,7 +360,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_freq', type=int, default=1000)
     parser.add_argument('--lr', type=float, default=0.002)
     parser.add_argument('--local_rank', type=int, default=0)
-    parser.add_argument('--ckpt', type=str, default='/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/smilification/checkpoints')
+    parser.add_argument('--ckpt', type=str, required=True)
     parser.add_argument('--pretrain', type=str, default=None)
     parser.add_argument('--sample', type=str, default='sample')
     parser.add_argument('--val_dir', type=str, default='val')
