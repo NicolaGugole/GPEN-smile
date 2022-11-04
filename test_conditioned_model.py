@@ -18,7 +18,7 @@ from torch.nn import functional as F
 from torch.utils import data
 
 # from training.data_loader.dataset_face import FaceDataset
-from face_model.gpen_model_classic import FullGenerator
+from face_model.gpen_model_condition_whole_model_concat_repeated_label import FullGenerator
 from distributed import (
     synchronize,
 )
@@ -61,7 +61,8 @@ def test(model, lpips_func, args, device, iter, label = 0):  # fixed label to 0,
         print(f'{i}/{len(lq_files)}')
         lq_f, hq_f = lq_fhq_f
         img_lq = cv2.imread(lq_f, cv2.IMREAD_COLOR)
-        img_t = torch.from_numpy(img_lq).to(device).permute(2, 0, 1).unsqueeze(0)
+        img_t = torch.from_numpy(img_lq)
+        img_t = img_t.to(device).permute(2, 0, 1).unsqueeze(0)
         img_t = (img_t/255.-0.5)/0.5
         img_t = F.interpolate(img_t, (args.size, args.size))
         img_lq_t = torch.flip(img_t, [1])
@@ -73,7 +74,7 @@ def test(model, lpips_func, args, device, iter, label = 0):  # fixed label to 0,
         img_hq_t = torch.flip(img_t, [1])
         
         with torch.no_grad():
-            img_out, __ = model(img_lq_t, iter) #, label = torch.LongTensor([label]).cuda())
+            img_out, __ = model(img_lq_t, iter, label=torch.LongTensor([label]).to(device))
         
             img_hq_lpips = lpips.im2tensor(lpips.load_image(hq_f)).to(device)
             img_hq_lpips = F.interpolate(img_hq_lpips, (args.size, args.size))
@@ -106,7 +107,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    device = 'cuda'
+    device = 'cuda:0'
 
     n_gpu = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     args.distributed = n_gpu > 1
@@ -118,18 +119,19 @@ if __name__ == '__main__':
 
     args.latent = 512
     args.n_mlp = 8
-    curr_ckpt = '/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/lifting-gpen/stylegan-remini/unconditional_0/053000.pth'
-    g_ema = FullGenerator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier, narrow=args.narrow, device=device
-    ).to(device)
-    g_ema.eval()
-    print('load model:', curr_ckpt)
-    ckpt = torch.load(curr_ckpt)
-    print(ckpt['g_ema'].keys())
-    g_ema.load_state_dict(ckpt['g_ema'])
-    lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
-    lpips_value, psnr_value = test(g_ema, lpips_func, args, device, 10000)#, label = 0)
-    print(f'Results with {curr_ckpt} - lpips_value: {lpips_value} - psnr_value: {psnr_value}')
-    print('LPIPS:', lpips_value.cpu().squeeze().item())
-    print('PSNR:', psnr_value.cpu().squeeze().item())
+    for i in ['028000.pth']:
+        curr_ckpt = f'/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/lifting-gpen/stylegan-remini/condition_concat_encoder/{i}'
+        # curr_ckpt = f'/home/wizard/buckets/bsp-ai-science-scratch/nicg/checkpoints/lifting-gpen/stylegan-remini/unconditioned_0/{i}'
+        g_ema = FullGenerator(
+            args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier, narrow=args.narrow, device=device
+        ).to(device)
+        g_ema.eval()
+        print('load model:', curr_ckpt)
+        ckpt = torch.load(curr_ckpt)
+        g_ema.load_state_dict(ckpt['g_ema'])
+        lpips_func = lpips.LPIPS(net='alex',version='0.1').to(device)
+        lpips_value, psnr_value = test(g_ema, lpips_func, args, device, 10000, label = 0)
+        print(f'Results with {i} - lpips_value: {lpips_value} - psnr_value: {psnr_value}')
+        print('LPIPS:', lpips_value.cpu().squeeze().item())
+        print('PSNR:', psnr_value.cpu().squeeze().item())
    

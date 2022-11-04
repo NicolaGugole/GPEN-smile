@@ -641,8 +641,6 @@ class LabelEmbedding(nn.Module):
         for l in torch.flatten(label):
             labels.append(torch.ones_like(inputs)[0] * l)
         labels = torch.stack(labels)
-        print(labels.shape)
-        print(inputs.shape, (torch.ones_like(inputs)*labels).shape)
         return torch.cat((inputs, torch.ones_like(inputs)*labels), 1)
 
 class FullGenerator(nn.Module):
